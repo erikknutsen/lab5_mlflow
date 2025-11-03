@@ -1,6 +1,7 @@
 # app/server.py
 import mlflow
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+import pandas as pd
 from pydantic import BaseModel, Field
 from typing import List
 
@@ -12,6 +13,33 @@ MODEL_VERSION       = "1"
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 MODEL_URI = f"models:/{MODEL_NAME}/{MODEL_VERSION}"
 model = mlflow.pyfunc.load_model(MODEL_URI)
+
+# 11/2 EK: SERVED and _load_version as helpers for homework criteria for dynamic model version call.
+SERVED = { #11/2 EK: Addeddictionary to save current model version.
+    "version": int(MODEL_VERSION),
+    "model": model
+}
+
+# 11/2 EK: SERVED and _load_version as helpers for homework criteria for dynamic model version call.
+
+def _load_version(version: int): #11/2 EK Added to update current version.
+    """
+    Load a specific model version from the MLflow Model Registry
+    and set it as the currently served model.
+    """
+    version = int(version)
+    model_uri = f"models:/{MODEL_NAME}/{version}"
+    try:
+        loaded = mlflow.pyfunc.load_model(model_uri) #https://mlflow.org/docs/latest/api_reference/python_api/mlflow.pyfunc.html
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load {model_uri}: {e}")
+    SERVED["version"] = version #Update dictionary value
+    SERVED["model"] = loaded #Update dictionary value
+    return {
+        "model_name": MODEL_NAME,
+        "model_uri": model_uri,
+        "version": version
+    }    
 
 # ----- Pydantic schemas with helpful docs + examples -----
 class IrisSample(BaseModel):
@@ -58,9 +86,39 @@ app = FastAPI(
     version="1.0.0",
 )
 
-@app.get("/health", tags=["health"])
+# TODO Add endpoint to get the current model serving version
+# Homework criterion #6: Provide an endpoint to view the current served version
+    
+@app.get("/health", tags=["health"], summary="Check API, MLflow connection, and current served model status")
 def health():
-    return {"status": "ok", "model_uri": MODEL_URI}
+    return {
+        "status": "ok",
+        "tracking_uri": MLFLOW_TRACKING_URI,
+        "model_name": MODEL_NAME,
+        "served_version": SERVED["version"],
+        "model_uri": f"models:/{MODEL_NAME}/{SERVED['version']}",
+        "model_is_loaded": SERVED["model"] is not None,
+        "endpoints": {
+            "serve_model": "/model/serve/{version}",
+            "predict": "/predict"
+        }
+    }
+
+# TODO Add endpoint to update the serving version
+# Homework Criterion #5: Create a new API endpoint to allow us to select a version to serve    
+@app.post("/model/serve/{version}", tags=["model"], summary="Serve a specific registered model version") #11/2 EK Added to update current version.
+def serve_model_version(version: int):
+    info = _load_version(version)
+    return {
+        "status": "ok",
+        "message": f"Now serving {info['model_name']} version {info['version']}.",
+        **info
+    }
+    
+
+# TODO Run predict
+# TODO Predict using the correct served version
+# Homework Criterion #4: Extend the API server to serve this registered model
 
 @app.post(
     "/predict",
@@ -70,12 +128,34 @@ def health():
     description="Send one or more Iris samples; returns class id (0,1,2) and label (setosa, versicolor, virginica)."
 )
 def predict(req: PredictRequest) -> PredictResponse:
-    # TODO Run predict
-    return PredictResponse(
-        class_id=[],
-        class_label=[]
-    )
+    if SERVED["model"] is None:
+        raise RuntimeError("No model is currently served. Use POST /model/serve/{version} first.")
     
-# TODO Add endpoint to get the current model serving version
-# TODO Add endpoint to update the serving version
-# TODO Predict using the correct served version
+    data = []
+    for sample in req.samples:
+        data.append([
+            sample.sepal_length,
+            sample.sepal_width,
+            sample.petal_length,
+            sample.petal_width
+        ])
+
+    df = pd.DataFrame(
+        data, 
+        columns=["sepal_length", "sepal_width", "petal_length", "petal_width"]
+    )
+
+    preds = SERVED["model"].predict(df)
+
+    class_ids = []
+    class_labels = []
+    for p in preds:
+        class_ids.append(int(p))
+        class_labels.append(IRIS_LABELS[int(p)])
+    
+    return PredictResponse(class_id=class_ids, class_label=class_labels)
+    
+    
+#    preds = model.predict(df)
+    
+
